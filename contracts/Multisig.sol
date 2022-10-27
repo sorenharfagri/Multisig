@@ -79,6 +79,11 @@ contract Multisig is Ownable, ReentrancyGuard {
         Transaction storage transaction = transactions[txId];
 
         require(
+            block.timestamp > transaction.executionTimestamp,
+            "Too early"
+        );
+
+        require(
             transactions[txId].confirmationsCount == ownersCount,
             "Not enough confirmations"
         );

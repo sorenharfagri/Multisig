@@ -1,5 +1,6 @@
 import { ethers } from "hardhat";
 import { expect } from "chai"
+import { time } from "@nomicfoundation/hardhat-network-helpers";
 import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers"
 import { BigNumberish } from "@ethersproject/bignumber"
 
@@ -69,7 +70,7 @@ describe("Multisig", () => {
         const { addToQueueTx: addToQueueTx2 } = await createAddToQueueTx(ownerAcc, addOwnerTxData, addOwnerTxTo, txValue, minimumTxDelay.add(15))
 
         const succesfullTxWaiting = (await addToQueueTx).wait()
-        const txFailExpectation = expect(addToQueueTx2).to.be.revertedWith("Transaction already in queue")
+        const txFailExpectation = expect(addToQueueTx2).to.be.rejectedWith("Transaction already in queue")
 
         await Promise.all([succesfullTxWaiting, txFailExpectation])
     })
@@ -230,7 +231,7 @@ describe("Multisig", () => {
 
         const cancelConfirmTx = multisig.connect(ownerAcc).cancelTxConfirmation(txId)
 
-        await expect(cancelConfirmTx).to.be.revertedWith("Not confirmed");
+        await expect(cancelConfirmTx).to.be.rejectedWith("Not confirmed");
     })
 
     it("Any owner can execute tx that was confirmed", async () => {
@@ -248,8 +249,9 @@ describe("Multisig", () => {
 
         const txValue = 0
         const minimumTxDelay = await multisig.MINIMUM_DELAY()
+        const timeLockDelay = minimumTxDelay.add(15)
 
-        const { addToQueueTx, txId } = await createAddToQueueTx(ownerAcc, addOwnerTxData, addOwnerTxTo, txValue, minimumTxDelay.add(15))
+        const { addToQueueTx, txId, timelockTimestamp } = await createAddToQueueTx(ownerAcc, addOwnerTxData, addOwnerTxTo, txValue, timeLockDelay)
 
         await (await addToQueueTx).wait()
 
@@ -259,7 +261,9 @@ describe("Multisig", () => {
         const confirmTx2 = await multisig.connect(anotherOwner).confirmTx(txId)
         await confirmTx2.wait()
 
-        const executeTx = await multisig.connect(ownerAcc).executeTx(txId)
+        await time.setNextBlockTimestamp(timelockTimestamp.add(1))
+
+        const executeTx = await multisig.connect(anotherOwner).executeTx(txId)
         await executeTx.wait()
 
         const isOwner = await multisig.isOwner(nominatedForOwnerAcc.address)
@@ -277,7 +281,8 @@ describe("Multisig", () => {
         await expect(executeTx).to.be.revertedWith("Tx doesnt exists")
     })
 
-    it("Cant execute that doesnt confrimed by all owners", async () => {
+    it("Cant execute tx that doesnt confrimed by all owners", async () => {
+
         const anotherOwner = acc2
 
         await addOwner(anotherOwner, [ownerAcc])
@@ -292,16 +297,42 @@ describe("Multisig", () => {
         const txValue = 0
         const minimumTxDelay = await multisig.MINIMUM_DELAY()
 
-        const { addToQueueTx, txId } = await createAddToQueueTx(ownerAcc, addOwnerTxData, addOwnerTxTo, txValue, minimumTxDelay.add(15))
+        const { addToQueueTx, txId, timelockTimestamp } = await createAddToQueueTx(ownerAcc, addOwnerTxData, addOwnerTxTo, txValue, minimumTxDelay.add(15))
 
         await (await addToQueueTx).wait()
 
         const confirmTx = await multisig.connect(ownerAcc).confirmTx(txId)
         await confirmTx.wait()
 
+        await time.setNextBlockTimestamp(timelockTimestamp.add(1))
 
         const executeTx = multisig.connect(ownerAcc).executeTx(txId)
         await expect(executeTx).to.be.revertedWith("Not enough confirmations")
+    })
+
+    it("Cant execute tx before timelock exceed", async () => {
+        const nominatedForOwnerAcc = acc3
+
+        const {
+            addOwnerTxData,
+            addOwnerTxTo
+        } = createAddOwnerTx(nominatedForOwnerAcc.address)
+
+        const txValue = 0
+        const minimumTxDelay = await multisig.MINIMUM_DELAY()
+
+        const { addToQueueTx, txId, timelockTimestamp } = await createAddToQueueTx(ownerAcc, addOwnerTxData, addOwnerTxTo, txValue, minimumTxDelay.add(15))
+
+        await (await addToQueueTx).wait()
+
+        await time.setNextBlockTimestamp(timelockTimestamp.sub(1))
+
+        const confirmTx = await multisig.connect(ownerAcc).confirmTx(txId)
+        await confirmTx.wait()
+
+
+        const executeTx = multisig.connect(ownerAcc).executeTx(txId)
+        await expect(executeTx).to.be.revertedWith("Too early")
     })
 
 
@@ -316,12 +347,11 @@ describe("Multisig", () => {
 
     async function createAddToQueueTx(senderAccount: SignerWithAddress, txData: string, txTo: string, txValue: BigNumberish, timelockDelaySeconds: BigNumberish) {
 
+        const latestBlockTimestamp = await time.latest()
+        const timelockTimestamp = ethers.BigNumber.from(timelockDelaySeconds).add(latestBlockTimestamp)
 
-        const currentBlockNumber = await ethers.provider.getBlockNumber();
-        const currentBlock = await ethers.provider.getBlock(currentBlockNumber);
-        const currentBlockTimestamp = ethers.BigNumber.from(currentBlock.timestamp);
-
-        const timelockTimestamp = currentBlockTimestamp.add(timelockDelaySeconds)
+        // console.log(({ latestBlockTimestamp }))
+        // console.log({ timelockTimestamp })
 
         const packedTxData = ethers.utils.solidityPack(
             ["address", "bytes", "uint256", "uint256"],
@@ -351,7 +381,8 @@ describe("Multisig", () => {
 
         const {
             addToQueueTx,
-            txId
+            txId,
+            timelockTimestamp
         } = await createAddToQueueTx(owners[0], addOwnerTxData, addOwnerTxTo, 0, minimumTxDelay.add(15))
 
         await (await addToQueueTx).wait()
@@ -364,6 +395,8 @@ describe("Multisig", () => {
         }
 
         await Promise.all(confirmTxs)
+
+        await time.setNextBlockTimestamp(timelockTimestamp.add(1))
 
         const executeTx = await multisig.connect(owners[0]).executeTx(txId)
         await executeTx.wait()
